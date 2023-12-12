@@ -1,0 +1,322 @@
+---
+title: "Exploring the Shooting Incidents in the Boroughs of New York City and the Possible Relationship Between Median Household Income of the Borough and the Age of the Victims"
+author: "Michael Hansen"
+date: "2023-11-09"
+output: pdf_document
+header-includes:
+  - \usepackage{soul} # for highlighting
+fontfamily: accanthis # gentler font
+urlcolor: blue # blue URL
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(gridExtra) # For displaying Graphs
+library(lubridate) # For easy parsing and manipulation of dates.
+library(openxlsx) # Excel Reader
+library(patchwork) # For arranging plots and Graphs
+library(purrr) #
+library(readxl) #Excel Reader
+library(scales) # For scaling graph labels and plots
+library(tidyverse) # For neat and tameable datasets
+library(zoo) # For handling time series calculations, irregular or normal
+``` 
+
+\centering \huge \textcolor{violet}{Part 1 - Hypothesis and Data Tidy}
+\par
+\Large 
+
+\normalsize \raggedright
+\par
+
+
+|   This report embarks on an exploration of the NYPD Shooting Incident Data (Historic) dataset (hereby referred to as NSID), made accessible to the public by the City of New York$^1$. Compiled by the New York Police Department, NSID includes a range of years from 2006 to 2022 and offers demographic information into both shooters and victims. The central objective of this study is to form and assess a hypothesis that New York City boroughs characterized by lower median family incomes exhibit higher incidences of shootings within younger age groups.
+
+|   The Office of Management Analysis and Planning operates as a department within the New York Police Department (NYPD)$^1$. Its core responsibilities encompass the regular extraction of data on a quarterly basis, followed by a review process before the data is made publicly available on the official NYPD website. Through an examination of the NSID datasets entry on data.gov, we have identified the primary source page$^2$. This discovery enables us to conveniently access the NSID via their API.
+
+The NSID landing page provides a comprehensive variable breakdown, comprising a total of 21 variables:
+
+*A single Unique Identifier
+
+*Two variables related to Time
+
+*Eleven variables related to Location
+
+*Seven variables related to Incident Information
+
+```{r import_nyt_data, warning = FALSE}
+
+ny_shootings_rawdata <- read.csv("https://data.cityofnewyork.us/resource/833y-fsy8.csv")
+
+
+# Below is a commented out line of code that will look for a CSV of the dataset in your project / home directiory, and if it doesn't find one it will write one for you so you have an offline copy.
+
+# if(!file.exists("NYPD_Shooting_Incident_Data__Historic__20231108.csv") == TRUE) write.csv(ny_shootings_rawdata, "NYPD_Shooting_Incident_Data__Historic__20231108.csv")
+```
+
+
+
+```{r dataset_Names, include = FALSE, warning = FALSE, message = FALSE}
+# Display names for report
+unique(ny_shootings_rawdata$boro)
+
+# Summarize to easily spot NA's
+summary(ny_shootings_rawdata)
+```
+
+```{r Dataset Tidy, warning = FALSE, message = FALSE}
+names(ny_shootings_rawdata)
+
+# Split the date and remove the extra timestamp
+ny_shootings_expand_date <- ny_shootings_rawdata %>%
+  separate("occur_date",
+    into = c("year", "month", "daytime"),
+    sep = "-",
+    remove = FALSE
+  ) %>%
+  separate("daytime",
+    into = c("day", "removeme"),
+    sep = "T",
+    remove = FALSE
+  ) %>%
+  select(!occur_date) %>%
+  select(!removeme) %>%
+  select(!daytime)
+
+ny_shooting_rename <- ny_shootings_expand_date %>%
+  rename("Ethnicity" = vic_race, "Age" = vic_age_group)
+# Remove extra location data and adjust the type of the murder indicator column
+ny_shootings_tidy <- ny_shooting_rename %>%
+  select(
+    incident_key:boro,
+    precinct,
+    statistical_murder_flag:y_coord_cd
+  ) %>%
+  mutate(mflag = as.numeric(statistical_murder_flag == "true"))
+```
+The NSID dataset was tidy'd by removing extra time and geo-spatial data. Further, in 2022 NYPD began recording further location descriptions, however as that data is not available in any prior year it was trimmed as well. 
+
+The next step in was to bring in the information on each Boroughs historical economic data. NYU Furman Center has a dataset, hereby referred to as NYUF, containing median income per household per Borough$^3$. NYUF has matching location and date information up to 2021 so it coincides with the prior NSID dataset for the years 2006 to 2021. A download link was provided exploring the universities website$^4$. The download provides an xlsx so I found a library that will be able to import the file without saving it to a computer providing reproducible settings. 
+ 
+```{r import_eco, warning = FALSE, message = FALSE}
+# Import sheet. Exploration showed only sheet 3 had relevent data
+nyc_eco <- read.xlsx("https://furmancenter.org/files/CoreData/Neighorhood_Indicators_CoreDataDownload_2023-05-14.xlsx", sheet = 3)
+# Number of Columns in NYUF
+nyc_eco_len <- length(names(nyc_eco))
+``` 
+  
+The dataset contains a vast amount of information containing `r nyc_eco_len` variables, however the dictionary$^5$ provided with it points us to the column hh_inc_med_adj which has the description: "The median household's total income of all members of the household aged 15 years or older."
+
+```{r ecoTidy, warning = FALSE, message = FALSE}
+# Select only relevent variables, then filter region down to boroughs
+eco_tidy1 <- nyc_eco %>%
+  select(
+    region_name,
+    region_type,
+    year,
+    hh_inc_med_adj
+  ) %>%
+  filter(region_type == "Borough")
+
+# Remove irrelevant years by filtering and removing NA (all prior to 2006, or group years)
+ny_boro_eco <- eco_tidy1 %>%
+  filter(is.na(hh_inc_med_adj) == FALSE) %>%
+  filter(year > 2005) %>%
+  select(everything(), "med_inc" = hh_inc_med_adj)
+
+```
+
+\centering \Large Data Exploration & Visualization 
+
+\raggedright \normalsize
+
+|   With the data sets in place the exploration began with a simple view of the NYUF and NSID over time so as to get a basis for the environments. The sum of the total incidents, murders, and the total median income were grouped by Borough and graphed over time.
+
+```{r firstVisual, warning = FALSE, message = FALSE, fig.asp=1, fig.ncol = 2}
+# Begin with Line Plot
+eco_boro_graph <- ny_boro_eco %>%
+  ggplot(mapping = aes(
+    x = year,
+    y = med_inc,
+    group = region_name,
+    color = region_name
+  )) +
+  # Set the line size, add labels and format, and finally add a theme
+  geom_line(size = 1.5) +
+  ggtitle("Median Household's Total Income", "Per Borough") +
+  ylab("Income in USD $") +
+  xlab("Year") +
+  labs(caption = "Source: NYU Furman Center for Real Estate and Urban Policy, 
+       State of the City Report.") +
+  theme_grey() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = -1)) +
+  scale_y_continuous(labels = scales::dollar_format())
+
+# Call to display
+eco_boro_graph
+
+# Summarise total incidents by Borough
+shootings_summary <- ny_shootings_tidy %>%
+  group_by(boro) %>%
+  summarize(total_shootings = n())
+
+# Plot
+ggplot(shootings_summary, aes(x = boro, y = total_shootings, fill = boro)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Total Shootings by Borough", x = "Borough", y = "Total Shootings")
+
+# Now Summarise by economic data
+income_summary <- ny_boro_eco %>%
+  group_by(region_name) %>%
+  summarize(median_income = median(med_inc))
+
+# Plot
+ggplot(income_summary, aes(x = region_name, y = median_income, fill = region_name)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Median Family Income by Borough", x = "Borough", y = "Median Income")
+
+```
+|   Examination between the total incidents and median income brings to light a similar pattern: the lower the income the higher amount of shootings. One interesting exception is in how staten island and manhatten are both relatively equal in their median income however the total shooting incidents is quite different. A theory of the reason being due to population was confirmed A quick search of each borough for the year 2021. It was found that the population of Staten Island was approximately 493,494$^5$ and Manhattan with 1,045,747 inhabitants$^6$.
+
+
+\newpage
+
+\centering \large In Depth View Into Each Borough
+
+\raggedright \normalsize
+
+|   Now a function was created to build a graph for each borough to visualize the number of incidents per age group. 
+
+```{r secondVisual, warning = FALSE, message = FALSE, fig.width=10, fig.height=8}
+# variable for Borough names
+boroughs <- unique(ny_shootings_tidy$boro)
+
+# Create the function, standard bar chart
+create_age_chart <- function(dataset, borough_name) {
+  filtered_data <- dataset %>%
+    filter(boro == borough_name) %>%
+    group_by(Age) %>%
+    summarize(TotalIncidents = n())
+
+  ggplot(filtered_data, aes(x = Age, y = TotalIncidents, fill = Age)) +
+    geom_bar(stat = "identity") +
+    labs(
+      title = paste("Total Incidents per age group in", borough_name),
+      x = "Age Group",
+      y = "Total Incidents"
+    ) +
+    theme_grey()
+}
+
+
+# Use Lapply to call the function on each and make a list
+plots <- lapply(boroughs, function(borough) {
+  create_age_chart(ny_shootings_tidy, borough)
+})
+
+# Wrap up the plots in 2 col
+combined_plot <- Reduce(`+`, plots) +
+  plot_layout(ncol = 2)
+
+# Display
+print(combined_plot)
+
+```
+
+| With the above graphs we can see that incidents in victims under the age of 25 outnumber victims in the older age groups by a considerable amount. 
+
+Next step we will merge the economic data and spread the data across a boxplot to explore the potential relationship. this was done by combining the datasets by year and Borough so as to correlate the median income of the area of each incident at the time of the incident. Then a function was created again to make the plots and then they are wrapped for display. 
+
+```{r economic, message = FALSE, warning = FALSE, fig.width=10, fig.height=8}
+# Need to change the boro names from all caps to normal case.
+convertToTitleCase <- function(name) {
+  tolower(name) %>% 
+  tools::toTitleCase()
+}
+
+ny_shootings_tidy$boro <- sapply(ny_shootings_tidy$boro, convertToTitleCase)
+
+
+# Merging the datasets on 'boro'/'region_name' and 'year'
+combined_data <- merge(ny_shootings_tidy, ny_boro_eco, by.x = c("boro", "year"), by.y = c("region_name", "year"))
+
+# Summarive to achieve desired groupings and averages
+shooting_age_income <- combined_data %>%
+  group_by(boro, Age, year) %>%
+  summarize(
+    total_shootings = n(),
+    avg_median_income = mean(med_inc, na.rm = TRUE)
+  )
+
+# Create a plot with facets for each borough
+ecoBoroGrapher <- function(dataset, boroName) {
+  borograph1 <- dataset %>%
+    filter(boro == boroName) %>%
+    ggplot(aes(x = avg_median_income, y = total_shootings, color = Age)) +
+    geom_point() +
+    labs(title = boroName) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = -1))
+
+  return(borograph1)
+}
+bronxGraph <- ecoBoroGrapher(shooting_age_income, "Bronx")
+brooklynGraph <- ecoBoroGrapher(shooting_age_income, "Brooklyn")
+manhattanGraph <- ecoBoroGrapher(shooting_age_income, "Manhattan")
+statenGraph <- ecoBoroGrapher(shooting_age_income, "Staten Island")
+queensGraph <- ecoBoroGrapher(shooting_age_income, "Queens")
+
+combined_plot <- bronxGraph + brooklynGraph + manhattanGraph + statenGraph + queensGraph +
+  plot_layout(guides = "collect") + # Collect legends into a single legend
+  plot_annotation(title = "Relationship between Shootings and Average Median Income by Borough and Age Group")
+
+# Print the combined plot
+print(combined_plot)
+
+```
+
+|   With the above graphs it's indicitive that the total number of incidents for the younger age groups <18 and 18-24 
+is greater in the lower income neighborhoods. In fact this trend is displayed for every age group in the every borough. 
+\newpage
+
+\centering \Large Conclusion, Bias, and Sources
+
+\raggedright \normalsize
+
+The analysis in this report has revealed discernible patterns, suggesting a correlation between the age demographics of shooting incident victims and the median income of the boroughs in New York City where these incidents transpired. Predominantly, data indicates a higher frequency of shooting incidents involving younger age groups (<18 and 18-24) in boroughs with lower median income levels. This trend is consistently observed across the boroughs, showing the potential relationships.
+
+These findings bring to light further research opportunities, such as differences in educational opportunities and higher levels of criminal activities in lower-income neighborhoods. It is noteworthy, however, that the data analyzed does not explicitly link the residency of either the perpetrator or the victim to the borough where the incident occurred. This limitation highlights the need for further detailed research, potentially requiring access to judicial records from New York City courts, to accurately uncover the originating residence of both parties.
+
+
+Future research endeavors could extend to examining:
+
+The role of geographical and accessibility factors in influencing the lower incidence rates in boroughs like Staten Island.
+A deeper understanding of each incidents story could be shown by including other demographic factors such as race.
+
+Bias: 
+
+An inspection into bias was found to be necessary as well. As bias could come from the author, a decision was made to only pull research from government or academic sources. As well caution was taken to ensure there was no connection between the author and any parties that could potentially be involved with any of the data used. 
+Another source of possible bias could lie within the officers involved with the incidents, or the NYPD employees handling and publishing the data. Unfortunately this is another area where deeper investigation into the organizations themselves would be required. 
+
+Sources:
+
+*Citation 1* "NYPD Shooting Incident Data (Historic)," Data.gov, City of New York, https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic.
+
+
+*Citation 2* https://www.nyc.gov/site/nypd/bureaus/administrative/strategic-initiatives.page*
+
+
+*Citation 3* https://furmancenter.org/stateofthecity/view/citywide-and-borough-data
+
+*Citation 4* https://furmancenter.org/files/CoreData/Neighorhood_Indicators_CoreDataDownload_2023-05-14.xlsx
+
+*Citation 5* https://furmancenter.org/coredata/userguide/data-downloads
+
+
+*Citation 6* "NYC Population by Borough and Neighborhood." NYC.gov, 16 Aug. 2022. Accessed 8 Dec. 2023.
+
+*Citation 7* "Staten Island Neighborhood Profile - NYU Furman Center." Furman Center for Real Estate & Urban Policy, New York University, 2023. Accessed 8 Dec. 2023.
+
+```{r sessioninfo}
+sessionInfo()
+```
